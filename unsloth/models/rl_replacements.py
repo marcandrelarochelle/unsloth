@@ -1149,6 +1149,8 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
                 if os.environ.get("UNSLOTH_FORCE_FLOAT32", "0") == "1":
                     self._autocast_dtype = torch.float16
 
+            compute_aux_loss = kwargs.get("compute_aux_loss", False)
+
             pixel_values, image_grid_thw = (
                 kwargs.get("pixel_values", None),
                 kwargs.get("image_grid_thw", None),
@@ -1195,6 +1197,7 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
                     multiplier = self.args.unsloth_logit_chunk_multiplier
 
             all_logprobs_list = []
+            all_aux_losses = []
             if pixel_values is None:
                 left_pad_tokens_per_prompt = calculate_pad_tokens_in_prompt(
                     input_ids, logits_to_keep, self.processing_class.pad_token_id
@@ -1358,7 +1361,10 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
                         _extra_vision_kwargs["mm_token_type_ids"] = mm_token_type_ids_chunk
                     with torch.amp.autocast(device_type = "cuda", dtype = self._autocast_dtype):
                         if pixel_values is None:
-                            logits_chunk = unwrapped_model(
+                            if compute_aux_loss:
+                                _extra_vision_kwargs["output_router_logits"] = True
+
+                            outputs = unwrapped_model(
                                 input_ids = input_ids_chunk,
                                 attention_mask = attention_mask_chunk,
                                 pixel_values = pixel_values_chunk,
@@ -1366,7 +1372,12 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
                                 pixel_attention_mask = pixel_attention_mask_chunk,
                                 image_sizes = image_sizes_chunk,
                                 **_extra_vision_kwargs,
-                            ).logits
+                            )
+
+                            if compute_aux_loss:
+                                all_aux_losses.append(outputs.aux_loss)
+
+                            logits_chunk = outputs.logits
 
                             completion_input_ids_chunk = input_ids_chunk[
                                 :, -(logits_to_keep + max_left_pad) :
@@ -1386,9 +1397,12 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
                                 temperature = temperature,
                             )
                         else:
+                            if compute_aux_loss:
+                                _extra_vision_kwargs["output_router_logits"] = True
+
                             # Essentially, for VLMs we do not go via the optimized path in models/,
                             # so we don't encounter the Flash Attn left-padding issue.
-                            logits_chunk = unwrapped_model(
+                            outputs = unwrapped_model(
                                 input_ids = input_ids_chunk,
                                 attention_mask = attention_mask_chunk,
                                 pixel_values = pixel_values_chunk,
@@ -1397,7 +1411,12 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
                                 image_sizes = image_sizes_chunk,
                                 logits_to_keep = logits_to_keep + 1,
                                 **_extra_vision_kwargs,
-                            ).logits
+                            )
+
+                            if compute_aux_loss:
+                                all_aux_losses.append(outputs.aux_loss)
+
+                            logits_chunk = outputs.logits
 
                             logits_chunk = logits_chunk[:, :-1, :]
                             completion_input_ids_chunk = input_ids_chunk[:, -logits_to_keep:]
@@ -1425,11 +1444,12 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
                     device_synchronize()
                     all_logprobs_list.append(logprobs_chunk)
                 logprobs = torch.cat(all_logprobs_list, dim = 0)
+                aux_loss = torch.stack(all_aux_losses).mean() if compute_aux_loss else None
                 entropies = None
 
             os.environ["UNSLOTH_RETURN_HIDDEN_STATES"] = "0"
 
-            return logprobs.detach(), entropies  # logps, entropies
+            return logprobs.detach(), entropies, aux_loss  # logps, entropies
             # input_ids = input_ids[:, -logits_to_keep:]
             # For transformers<=4.48, logits_to_keep argument isn't supported, so here we drop logits ourselves.
             # See https://github.com/huggingface/trl/issues/2770
