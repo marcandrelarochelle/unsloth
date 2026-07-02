@@ -1627,7 +1627,7 @@ def _patch_trl_rl_trainers_impl(trainer_file = "grpo_trainer"):
 
         if trl_version >= Version("1.7.0"):
             peft_pattern = (
-                r"\s*elif is_peft_available\(\) and is_peft_model\(model\) and args\.beta != 0\.0:"
+                r"\s*elif is_peft_model\(model\) and args\.beta != 0\.0:"
                 r".*?"
                 r"param\.data = param\.data\.to\(torch\.bfloat16\)"
             )
