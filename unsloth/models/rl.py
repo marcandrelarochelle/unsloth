@@ -1632,7 +1632,7 @@ def _patch_trl_rl_trainers_impl(trainer_file = "grpo_trainer"):
             peft_pattern = (
                 r"\s*elif is_peft_model\(model\) and args\.beta != 0\.0:"
                 r".*?"
-                r"ref_param\.data\.copy_\(param\.data\)"
+                r"ref_param\.data\.copy_\(param\.data\)")
 
             replacement_comment = (
                 "\n        # PEFT initialization logic removed via script for trl >= 1.7.0\n"
