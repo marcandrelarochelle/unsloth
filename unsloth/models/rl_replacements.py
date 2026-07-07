@@ -1380,6 +1380,7 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
                                 all_aux_losses.append(outputs.aux_loss)
 
                             logits_chunk = outputs.logits
+                            del outputs
 
                             completion_input_ids_chunk = input_ids_chunk[
                                 :, -(logits_to_keep + max_left_pad) :
@@ -1420,6 +1421,7 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
                                 all_aux_losses.append(outputs.aux_loss)
 
                             logits_chunk = outputs.logits
+                            del outputs
 
                             logits_chunk = logits_chunk[:, :-1, :]
                             completion_input_ids_chunk = input_ids_chunk[:, -logits_to_keep:]
