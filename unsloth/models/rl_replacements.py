@@ -1952,7 +1952,7 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
                 handles = []
 
                 for layer, modules in logit_lens_modules.items():
-                    if layer != "shared" and layer in ["20", "24"]:
+                    if layer != "shared":
                         handles.append(modules["mlp"].register_forward_hook(logit_lens_hook(int(layer), logit_lens_modules["shared"]["norm"], logit_lens_modules["shared"]["lm_head"])))
 
                 layer_logprobs = defaultdict()
