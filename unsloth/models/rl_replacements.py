@@ -1925,6 +1925,38 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
                 _pk_hidden = _pk_sel = _pk_result = _pk_ref = None
 
             with _get_inference_mode_context_manager(model):
+                layer_id_pattern = re.compile(".+(\d+).+")
+                logit_lens_modules = defaultdict(dict)
+
+                for name, module in student_model.named_modules():
+                    if name.endswith(".mlp"):
+                        match = layer_id_pattern.match(name)
+                        layer_id = match.group(0)
+
+                        if layer_id is not None:
+                            logit_lens_modules[layer_id][name.split(".")[-1]] = module
+                    
+                    if name.endswith(".norm") or name.endswith(".lm_head"):
+                        logit_lens_modules["shared"][name.split(".")[-1]] = module
+
+                chunked_layer_logits = defaultdict()
+
+                def logit_lens_hook(layer_id, norm, lm_head):
+                    def logit_lens(module, input, output):
+                        chunked_layer_logits[layer_id] = norm(output)
+
+                        return output
+
+                    return logit_lens
+
+                handles = []
+
+                for layer, modules in logit_lens_modules.items():
+                    if layer != "shared" and layer in ["20", "24"]:
+                        handles.append(modules["mlp"].register_forward_hook(logit_lens_hook(int(layer), logit_lens_modules["shared"]["norm"], logit_lens_modules["shared"]["lm_head"])))
+
+                layer_logprobs = defaultdict()
+
                 for (
                     input_ids_chunk,
                     attention_mask_chunk,
@@ -1954,6 +1986,30 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
 
                             logits_chunk = outputs.logits
                             del outputs  # free hidden_states before chunked log-softmax
+
+                            for layer_id in list(chunked_layer_logits.keys()):
+                                layer_loggit_chunk = chunked_layer_logits[layer_id]
+                                chunked_layer_logits.pop(layer_id)
+
+                                layer_completion_input_ids_chunk = input_ids_chunk[
+                                    :, -(logits_to_keep + max_left_pad) :
+                                ]
+                                layer_loggit_chunk = layer_loggit_chunk[
+                                    :, -(logits_to_keep + max_left_pad + 1) :, :
+                                ]
+                                layer_loggit_chunk = layer_loggit_chunk[:, :-1, :]
+                                layer_logprobs_chunk = chunked_hidden_states_selective_log_softmax(
+                                    layer_loggit_chunk,
+                                    lm_head,
+                                    completion_input_ids_chunk,
+                                    chunks = input_ids_chunk.shape[0] * multiplier,
+                                    logit_scale_multiply = logit_scale_multiply,
+                                    logit_scale_divide = logit_scale_divide,
+                                    logit_softcapping = logit_softcapping,
+                                    temperature = 0,
+                                )
+
+                                layer_logprobs[layer_id] = torch.cat(layer_logprobs[layer_id], layer_logprobs_chunk, dim=0) if layer_logprobs[layer_id] is not None else layer_logprobs_chunk
 
                             completion_input_ids_chunk = input_ids_chunk[
                                 :, -(logits_to_keep + max_left_pad) :
@@ -2024,7 +2080,7 @@ def grpo_trainer__get_per_token_logps_and_entropies(function_name, function):
             # and explicit opt-in is rejected at trainer init, so this is always None (kept in the
             # return for TRL >= 1.7.0's 3-tuple contract).
             aux_loss = None
-            return logprobs.detach(), entropies, aux_loss  # logps, entropies, aux_loss
+            return logprobs.detach(), entropies, aux_loss, layer_logprobs  # logps, entropies, aux_loss
             # input_ids = input_ids[:, -logits_to_keep:]
             # For transformers<=4.48, logits_to_keep argument isn't supported, so here we drop logits ourselves.
             # See https://github.com/huggingface/trl/issues/2770
